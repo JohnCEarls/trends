@@ -1,6 +1,7 @@
 import pymongo as pym
 import re
 class GEOvector:
+    global_storage = {}#a cheap workaround to speed up processing
     def __init__(self, geo_id, word_map, mongo_conn, scale=1, pseudocount=0, source=None, auto_build=True, stopwords=None):
         self.stopwords = {}
         if stopwords is not None:
@@ -23,30 +24,35 @@ class GEOvector:
         self._vec = self._buildVector(source)
 
     def _buildVector(self, source=None):
-        try:
-            word_dict = self.word_map
-            connection = self.mongo_conn
-            ps = self.pseudocount
-            myvec = map(lambda x: ps, self.word_map.keys())
-            query = {'geo_id': self.geo_id}
-            if source is not None:
-                query = {'$and': [query, {'$or': [{'source':s } for s in source]} ]}
-            sum_counts = 0        
-            for x in connection.geo.word2geo.find(query):
-                if x['word'] not in self.stopwords:
-                    if 'count' in x:
-                        myvec[word_dict[x['word']]] += self.scale*x['count']
-                        sum_counts += x['count']
-                        self.numWords += x['count']
-                    else:
-                        myvec[word_dict[x['word']]] += self.scale
-                        sum_counts += self.scale 
-                        self.numWords += 1 
-            
-        except:
-            import sys
-            print sys.exc_info()
-            return None
+        if self.geo_id not in GEOvector.global_storage:
+            try:
+                word_dict = self.word_map
+                connection = self.mongo_conn
+                ps = self.pseudocount
+                myvec = map(lambda x: ps, self.word_map.keys())
+                query = {'geo_id': self.geo_id}
+                if source is not None:
+                    query = {'$and': [query, {'$or': [{'source':s } for s in source]} ]}
+                sum_counts = 0        
+                for x in connection.geo.word2geo.find(query):
+                    if x['word'] not in self.stopwords:
+                        if 'count' in x:
+                            myvec[word_dict[x['word']]] += self.scale*x['count']
+                            sum_counts += x['count']
+                            self.numWords += x['count']
+                        else:
+                            myvec[word_dict[x['word']]] += self.scale
+                            sum_counts += self.scale 
+                            self.numWords += 1 
+                
+            except:
+                import sys
+                print sys.exc_info()
+                return None
+            GEOvector.global_storage[self.geo_id] = (myvec, self.numWords)
+        else:
+            self.numWords = GEOvector.global_storage[self.geo_id][0]
+            return GEOvector.global_storage[self.geo_id][0]
         return myvec
 
    
