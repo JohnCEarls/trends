@@ -5,8 +5,12 @@ import numpy as np
 from GEOvector import GEOvector 
 import sklearn.naive_bayes
 from itertools import izip
+import sklearn.mixture
+import sklearn.cluster
+import json
+
 class Learner:
-    def __init__(self, mongo_loc='clutch', nclasses = 2, stopwords = None, burn=1.0):
+    def __init__(self, mongo_loc='clutch', nclasses = 2, stopwords = None, burn=1.0, words_file=None, fit_prior=False, alpha=1.0):
         """
         initialize the learner class - pretty much just sets class variables
             mongo_loc - network id of the mongo server
@@ -16,8 +20,17 @@ class Learner:
         """
 
         self._conn = pymongo.Connection(mongo_loc)
-        self.dictionary = self.getWords() #the mapping word -> vector index
+    
+        if words_file is None:
+            self.dictionary = self.getWords() #the mapping word -> vector index
+        else:
+            f = open(words_file,'r')
+            self.dictionary = json.loads(f.read())
+            f.close()
+        self.fit_prior = fit_prior
+        self.M = len(self.dictionary.keys())
         #temporary data structures used to build sparse matrix
+        #number of columns
         #kill after sparse matrix created
         self.num_classes = nclasses
         #storage for the labelled data
@@ -25,7 +38,9 @@ class Learner:
         self.lrow = []
         self.lcol = []
         self.stopwords = stopwords
-        self.burn = 1.0
+        self.burn =burn
+        self.alpha = alpha
+        self.bayes_model = None
 
     def buildLabelCoords( self, geo_ids):
         """
@@ -40,7 +55,7 @@ class Learner:
         col = []
         for i, val in enumerate(geo_ids):
             gv = GEOvector(val, self.dictionary, self._conn, stopwords=self.stopwords)
-            self.addVecToCoord(gv,i, data, row, col, default=gv.pseudocount)
+            self.addVecToCoord(gv,i, data, row, col)
         return (data, row, col)
 
     def buildLabeledModel( self, geo_ids, classes, threshold=20):
@@ -60,7 +75,6 @@ class Learner:
         self.ldata, self.lrow, self.lcol = self.buildLabelCoords( geo_ids )
         self.lclasses = classes
         self.lN = len(geo_ids) #number of rows
-        self.M = len(self.dictionary.keys())#number of columns
 
     def removeWeakGEO(self, geo_ids, thresh=20):
         """
@@ -109,18 +123,30 @@ class Learner:
             self.burn += .05
         else:
             self.burn = 1.0
+        skip = 0
+        post_sort = np.argsort(posterior, axis=0)
+        p_r = -1
+        min_order = uN -self.k #the kth largest elements sorted value
         for j in range(self.num_classes):
             assert len(self.udata) == len(self.urow)
             assert len(self.ucol) == len(self.urow)
             for d, r, c in izip(self.udata, self.urow, self.ucol):
-                pij = posterior[r, j]#P(sample i is from class j)
-                data.append(d*pij*self.burn)#weighted data
-                row.append(j*uN + r + lN)
-                col.append(c)
-            for q in range(uN):
+                if post_sort[r,j] >= min_order:
+                    pij = max(posterior[r, j], .1)#P(sample i is from class j)
+                    row.append(j*uN + r + lN - skip)
+                    data.append(d*pij*self.burn)#weighted data
+                    #data.append(d)#weighted data
+                    col.append(c)
+                    if p_r != r:
+                        #print "class " + str(j)
+                        #print "posterior :" +str(pij)
+                        classes.append(j)
+                elif p_r != r:#only add to skip if new row (e.g. new geo_id)
+                    skip +=1
+                p_r = r
+            for q in range(uN-skip):
                 classes.append(j)
-        N = uN*self.num_classes
-        return (data,row,col,classes, N)
+        return (data,row,col,classes, len(classes))
 
     def EStep(self, learner):
         """
@@ -167,7 +193,7 @@ class Learner:
             Y-array mapping each samples to a class (samples x 1)
             returns - (sklearn.naive_bayes.MultinomialNB object) fit to X, Y
         """
-        b = sklearn.naive_bayes.MultinomialNB(alpha=1, fit_prior=False)
+        b = sklearn.naive_bayes.MultinomialNB(alpha=self.alpha, fit_prior=self.fit_prior)
         b.fit(X, Y)
         return b        
        
@@ -196,26 +222,26 @@ class Learner:
         prev_post_sum = 0
         post_sum = 1
         #EM
+        self.k = self.lN/self.num_classes
         while counter < max_iter and prev_post_sum != post_sum:
-            print "iteration: "
-            print counter
-            prev_post_sum = post_sum
+            if self.k > self.uN:#only start looking for convergence after using all samples
+               prev_post_sum = post_sum
             post_sum = 0
             #build posterior dist from model and unlabeled
             post = self.EStep( bayes_model )
             #see if posterior has changed
-            for x in post:
-                post_sum += (x[0] - x[1])**2
-                if x[0] > x[1]:
-                    print "kidney"
-                else:
-                    print "prostate"
+            for x in post:#need better convergence
+                post_sum += (x[0] - x[1] - x[2])**2
             #update model using unlabeled data weighted by the posterior dist 
             bayes_model = self.MStep( post )
             counter += 1
+            self.k += self.k #double number of samples to add each time
+        self.bayes_model = bayes_model
+        print "iterations: ",
+        print counter -1
         return bayes_model
         
-        
+     
     def getWords(self):
         """
         get all of the words
@@ -226,24 +252,83 @@ class Learner:
             word_dict[word] = i
         return word_dict
 
-    def addVecToCoord(self, vec, row_n, data, row, col, default=0):
+    def addVecToCoord(self, vec, row_n, data, row, col):
         """
         build coordinate vector from GEOVector
+        vec - GEOvector object
+        row_n - integer for the row this vector will occupy in matrix
+        data, row, col - data, row, col lists to be appended to
+
         """
         wc = 0
-        for i, val in enumerate(vec):
-            if val != default:
-                data.append(val)
-                col.append(i)
-                row.append(row_n)
+        d,v =  vec.getSparse()
+        for gv_data, gv_col in izip(d,v):
+            data.append(gv_data)
+            col.append(gv_col)
+            row.append(row_n)
             
+    def predict(self, geo_id):
+        geo_vec = GEOvector(geo_id, self.dictionary, self._conn, stopwords=self.stopwords)         
+        data, row, col = ([],[], [])
+        self.addVecToCoord(geo_vec,0, data, row, col) 
+        
+        return self.bayes_model.predict(scipy.sparse.coo_matrix((data, (row, col)), shape=(1, self.M)))[0]
 
+    def cluster(self, geo_ids, max_num_clusters, threshold = 20):
+        print len(geo_ids)
+        geo_ids = self.removeWeakGEO(geo_ids, thresh=threshold)
+
+        data, row, col = self.buildLabelCoords( geo_ids )        
+        print self.M
+        print len(geo_ids)
+        mymat = scipy.sparse.coo_matrix((data, (row, col)), shape=(len(geo_ids), self.M))
+        #print mymat
+        print mymat.shape
+        self.gmm = sklearn.cluster.KMeans(k=2)  #sklearn.mixture.GMM(n_components=max_num_clusters)
+        self.gmm.fit( mymat )
+        print self.gmm.n_components
+        print self.gmm.means
+
+        
+    def cluster_identity( self, geo_id ):
+        data, row, col = self.buildLabelCoords( [geo_id] )
+        mymat = scipy.sparse.coo_matrix((data, (row, col)), shape=(1, self.M))
+        print mymat
+        return self.gmm.predict(mymat)
+    
 if __name__ == "__main__":
-    l = Learner(stopwords="stop.txt")
+    l = Learner(mongo_loc='clutch',stopwords="stop.txt")
     g = ["GDS1023","GDS1282","GDS1344","GDS1411","GDS1438","GDS1499","GDS1548","GDS1700","GDS1713","GDS2018","GDS1390","GDS1423","GDS1439","GDS1697","GDS1699","GDS1736","GDS1746","GDS1973","GDS2034","GDS2171"]
     unlabeled = ["GDS2426","GDS2499","GDS2880","GDS2881","GDS2921","GDS3274","GDS3524","GDS3603","GDS3626","GDS505","GDS507","GDS686","GDS724","GDS892","GDS893","GDS916","GDS961","GDS987","GSE1009","GSE1147","GSE12090","GSE12792","GSE1309","GSE14328","GSE14630","GSE1563","GSE16441","GSE1743","GSE1801","GSE1822","GSE1823","GSE19249","GSE1982","GSE2004","GSE2020","GSE20247","GSE20896","GSE21816","GSE22316","GSE22459","GDS2384","GDS2499","GDS2545","GDS2546","GDS2547","GDS2617","GDS2618","GDS2782","GDS2865","GDS2958","GDS2971","GDS3095","GDS3111","GDS3155","GDS3289","GDS3634","GDS3710","GDS535","GDS536","GDS719","GDS720","GDS721","GDS722","GDS723","GSE11701","GSE15787","GSE16120","GSE17031","GSE17708","GSE18109","GSE1825","GSE18573","GSE18916","GSE18917","GSE18918","GSE19396","GSE19426","GSE19822","GSE20317","GSE20543"]
     c=[0 if i<len(g)/2 else 1 for i in range(len(g))]
+    print "starting cluster"
+    #l.cluster(unlabeled, 2)
+    #for u in unlabeled:
+    #    print l.cluster_identity(u)
     print "starting EM"
+    
+    g=  ["GSM258553", "GSM258555", "GSM258556", "GSM258557", "GSM258562", "GSM258563", "GSM258565", "GSM258566", "GSM258570", "GSM258578", "GSM258580", "GSM258583", "GSM258585", "GSM258590","GSM15749", "GSM15750", "GSM15751", "GSM15752", "GSM15753", "GSM15754", "GSM15755", "GSM15756", "GSM15757", "GSM15758"]    
+    c=[0 if i<len(g)/2 else 1 for i in range(len(g))]
+    unlabeled = ["GSM101105", "GSM101106", "GSM101107", "GSM101108", "GSM101109", "GSM101110", "GSM101111", "GSM101112", "GSM101113", "GSM101114", "GSM101115", "GSM101116", "GSM272770", "GSM272771", "GSM272772", "GSM210005", "GSM210009", "GSM210014", "GSM210015", "GSM210087", "GSM210192", "GSM210196", "GSM210979", "GSM211008", "GSM212067", "GSM212068", "GSM212070", "GSM212787", "GSM212789", "GSM212790", "GSM212811", "GSM212853", "GSM213035", "GSM213036", "GSM114089", "GSM114090", "GSM190151", "GSM190153", "GSM252879", "GSM252882", "GSM252884", "GSM252885", "GSM254149", "GSM254150", "GSM254151", "GSM254152", "GSM254157", "GSM254158", "GSM254159", "GSM254160", "GSM254161", "GSM469508", "GSM469513", "GSM469515", "GSM469516", "GSM469517", "GSM469519", "GSM469521", "GSM28358", "GSM28360", "GSM28362", "GSM28370", "GSM28372", "GSM28374", "GSM28376", "GSM28378", "GSM28380", "GSM28382", "GSM28384", "GSM28386", "GSM309986", "GSM309987", "GSM309988", "GSM309989", "GSM475657", "GSM475658", "GSM475659", "GSM475660", "GSM475663", "GSM475665", "GSM475666", "GSM475667", "GSM475669", "GSM475671", "GSM475673", "GSM475675", "GSM475678", "GSM475680", "GSM475682", "GSM475684", "GSM475686", "GSM475688", "GSM475690", "GSM475693", "GSM475695", "GSM475697", "GSM475699", "GSM475702", "GSM475704", "GSM475705", "GSM475707", "GSM475711", "GSM475714", "GSM475716", "GSM475718", "GSM475721", "GSM475723", "GSM475725", "GSM475726", "GSM475729", "GSM475732", "GSM475734", "GSM475736", "GSM475738", "GSM475740", "GSM475742", "GSM475743", "GSM475745", "GSM370937", "GSM370940", "GSM370942", "GSM370943", "GSM370945", "GSM370946", "GSM370947", "GSM370948", "GSM370949", "GSM370952", "GSM370953", "GSM370954", "GSM370957", "GSM370959", "GSM370960", "GSM370961", "GSM370963", "GSM370964", "GSM370965", "GSM370966", "GSM370968", "GSM370969", "GSM370970", "GSM370971", "GSM370973", "GSM370974", "GSM370975", "GSM370978", "GSM370981", "GSM370982", "GSM370983", "GSM370988", "GSM370989", "GSM370990", "GSM370991", "GSM370993", "GSM370994", "GSM370995", "GSM370996", "GSM370998", "GSM475664", "GSM475668", "GSM475674", "GSM475694", "GSM475713", "GSM475719", "GSM475728", "GSM475730", "GSM475731", "GSM475733", "GSM475735", "GSM475744", "GSM475748", "GSM475751", "GSM475753", "GSM475756", "GSM475758", "GSM475759", "GSM475760", "GSM475762", "GSM475763", "GSM475778", "GSM475782", "GSM475789", "GSM475801", "GSM475804", "GSM475806"]
+    print "starting cluster"
     b = l.EM(g, c, unlabeled)
     print "ending EM"
-    print b.feature_log_prob_
+    for u in unlabeled:
+        print u + ":"
+        print l.predict(u)
+    """
+    kidney_p  = [(i, p) for i, p in enumerate(b.feature_log_prob_[0])]
+    prostate_p  = [(i, p) for i, p in enumerate(b.feature_log_prob_[1])]
+    kidney_p.sort(key=lambda x: x[1], reverse=True)
+    prostate_p.sort(key=lambda x: x[1],reverse=True)
+    mymap = ['m' for x in l.dictionary.keys()]
+    for k, v in l.dictionary.iteritems():
+        mymap[v] = k
+    count = 0
+    for kid, pro in izip(kidney_p, prostate_p):
+        print mymap[kid[0]] + str(kid[1]) + " --- " + mymap[pro[0]] + str(pro[1])
+        if count > 100:
+            break
+        count += 1
+    """
+
