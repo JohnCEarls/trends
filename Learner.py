@@ -10,7 +10,7 @@ import sklearn.cluster
 import json
 
 class Learner:
-    def __init__(self, mongo_loc='clutch', nclasses = 2, stopwords = None, burn=1.0, words_file=None, fit_prior=False, alpha=1.0):
+    def __init__(self, mongo_loc='clutch', mongo_port=27017 nclasses = 2, stopwords = None, burn=1.0, words_file=None, fit_prior=False, alpha=1.0):
         """
         initialize the learner class - pretty much just sets class variables
             mongo_loc - network id of the mongo server
@@ -19,7 +19,7 @@ class Learner:
             burn - initial burn in value (initial weight that an unlabeled example is allowed to contribute to the learning. Increases by .05 every iteration until it reaches 1.0)
         """
 
-        self._conn = pymongo.Connection(mongo_loc)
+        self._conn = pymongo.Connection(mongo_loc, port=mongo_port)
     
         if words_file is None:
             self.dictionary = self.getWords() #the mapping word -> vector index
