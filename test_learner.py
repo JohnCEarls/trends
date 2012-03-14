@@ -32,7 +32,7 @@ def buildParams(set1, set2, seeds = 4):
         elif k == set2:
             class_map.append((1,k))
         else:
-            class_map.append((2,k))#null set 
+            class_map.append((2,k))
 
     labeled = []
     class_vec = []
@@ -56,8 +56,10 @@ def buildParams(set1, set2, seeds = 4):
     
 if __name__ == "__main__":
     import json
+    import random
     c = Connection('clutch')
     phenos = [u'squamous cell carcinoma', u'asthma', u'normal', u'large cell lung carcinoma', u'adenocarcinoma', u'chronic obstructive pulmonary disease']
+    random.shuffle(phenos)
     """
     grouped_samples = {}
     for x in c.geo.samples.distinct("phenotype"):
@@ -79,11 +81,14 @@ if __name__ == "__main__":
     
     print "initializing learner"
     from itertools import combinations
-    for s1, s2 in combinations(phenos, 2):
-        for seeds in range(4, 30,3):
-            for fp in [True, False]:
-                for burn in [.1, .5, 1.0]:
-                    for alpha in [.1, .5, 1.0, 2.0, 5.0]:
+    trip_early = 0
+    s2 = 'None'
+    for s1 , s2 in combinations(phenos, 2):
+        trip_early += 1
+        for seeds in [10]:#range(4, 30,3):
+            for fp in [True]:#, False]:
+                for burn in [.1]:#, .5, 1.0]:
+                    for alpha in [1.0]:#[.1, .5, 1.0, 2.0, 5.0]:
                         learner = Learner(nclasses=3, words_file="words.json", fit_prior=fp,burn=burn, alpha=alpha )
                         #print "building params"
                         labeled, class_vec, unlabeled, s_map, class_map = buildParams(s1, s2, seeds=seeds)
@@ -94,13 +99,19 @@ if __name__ == "__main__":
                         incorrect_map = {}
                         for k, c in s_map.iteritems():
                             if c not in correct_map:
-                                incorrect_map[c] = 0
+                                incorrect_map[c] = {}
+                                for i in range(3):
+                                    incorrect_map[c][i] = 0
                                 correct_map[c] = 0
-                            if learner.predict(k) == c:
+                            mypred = learner.predict(k)
+                            if mypred == c:
                                 correct += 1
-                                correct_map[c] += 1
+                                correct_map[c] += 1 
+                                """
+                                if c < 1:
+                                    print str(c) + " : " + k"""
                             else:
-                               incorrect_map[c] += 1
+                               incorrect_map[c][mypred] += 1
                                incorrect += 1
                         print "*"*10
                         print s1 + ' vs ' + s2
