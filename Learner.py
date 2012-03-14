@@ -8,9 +8,9 @@ from itertools import izip
 import sklearn.mixture
 import sklearn.cluster
 import json
-
+import random
 class Learner:
-    def __init__(self, mongo_loc='clutch', mongo_port=27017 nclasses = 2, stopwords = None, burn=1.0, words_file=None, fit_prior=False, alpha=1.0):
+    def __init__(self, mongo_loc='clutch', mongo_port=27017, nclasses = 2, stopwords = None, burn=1.0, words_file=None, fit_prior=False, alpha=1.0):
         """
         initialize the learner class - pretty much just sets class variables
             mongo_loc - network id of the mongo server
@@ -125,14 +125,53 @@ class Learner:
             self.burn = 1.0
         skip = 0
         post_sort = np.argsort(posterior, axis=0)
-        p_r = -1
+        prev_r = -1
         min_order = uN -self.k #the kth largest elements sorted value
+        row_counter = 0
+        added = {}
+        c_count = [0,0,0]
+        for r in range(uN):
+            for j in range(self.num_classes):
+                if posterior[r,j] > .5:
+                    classes.append(j)
+                    added[r] = row_counter
+                    row_counter += 1
+                    c_count[j] += 1
+        #I pity the fool with no matches
+        for i, cc in enumerate(c_count):
+            if cc == 0:#no samples
+                pity = random.sample([x for x in range(uN)],max(sum(c_count)/3, 3 ))
+                for p in pity:
+                    classes.append(i)
+                    added[p] = row_counter
+                    row_counter += 1
+                    c_count[j] += 1
+
+                
+
+            
+                
+         
+        for d,r,c in izip(self.udata, self.urow, self.ucol):
+            if r in added:
+                pij = posterior[r, classes[added[r]]]#P(sample i is from class j)
+                #pij = 1.0
+                row.append(added[r]) #(j*uN + r + lN - skip)
+                data.append(d*pij*self.burn)#weighted data
+                #data.append(d)#weighted data
+                col.append(c)
+           
+       
+
+        """
         for j in range(self.num_classes):
+            skip = 0
             assert len(self.udata) == len(self.urow)
             assert len(self.ucol) == len(self.urow)
             for d, r, c in izip(self.udata, self.urow, self.ucol):
-                if post_sort[r,j] >= min_order:
-                    pij = max(posterior[r, j], .1)#P(sample i is from class j)
+                if  posterior[r, j] > .5:#post_sort[r,j] >= min_order:
+                    pij = posterior[r, j]#P(sample i is from class j)
+                    
                     row.append(j*uN + r + lN - skip)
                     data.append(d*pij*self.burn)#weighted data
                     #data.append(d)#weighted data
@@ -144,8 +183,13 @@ class Learner:
                 elif p_r != r:#only add to skip if new row (e.g. new geo_id)
                     skip +=1
                 p_r = r
+                if skip == uN:
+                    print "Class " + str(j) + " is empty"
+            
+            print uN-skip 
             for q in range(uN-skip):
                 classes.append(j)
+            """
         return (data,row,col,classes, len(classes))
 
     def EStep(self, learner):
@@ -215,7 +259,9 @@ class Learner:
         X =scipy.sparse.coo_matrix( (d, (r, c)), shape= (self.lN, self.M) )
         Y = np.array(self.lclasses)
         bayes_model = self.runBayes(X,Y)
-
+        if False:
+            self.bayes_model = bayes_model
+            return bayes_model
         
         counter = 0#for max_iter
         #vars to test for convergence
@@ -224,14 +270,14 @@ class Learner:
         #EM
         self.k = self.lN/self.num_classes
         while counter < max_iter and prev_post_sum != post_sum:
-            if self.k > self.uN:#only start looking for convergence after using all samples
+            if self.k > self.uN and self.burn >= 0.5:#only start looking for convergence after using all samples
                prev_post_sum = post_sum
             post_sum = 0
             #build posterior dist from model and unlabeled
             post = self.EStep( bayes_model )
             #see if posterior has changed
             for x in post:#need better convergence
-                post_sum += (x[0] - x[1] - x[2])**2
+                post_sum += sum([x_i**2 for x_i in x])
             #update model using unlabeled data weighted by the posterior dist 
             bayes_model = self.MStep( post )
             counter += 1
